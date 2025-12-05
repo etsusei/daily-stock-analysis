@@ -312,7 +312,12 @@ Here is the Data:
 def main():
     print(f"=== 批量生成全指标分析报告 ===\n")
     
-    html_content = """
+    # 1. 生成侧边栏链接 HTML
+    sidebar_links = ""
+    for symbol in SYMBOLS:
+        sidebar_links += f'<a href="#{symbol}" onclick="closeSidebar()">{symbol}</a>\n'
+
+    html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-CN">
     <head>
@@ -320,28 +325,171 @@ def main():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Stock Analysis Report</title>
         <style>
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 1200px; margin: 0 auto; padding: 20px; background-color: #f4f4f9; }
-            h1 { text-align: center; color: #2c3e50; }
-            .stock-card { background: #fff; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 30px; padding: 25px; }
-            .stock-title { font-size: 1.8em; color: #2980b9; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-bottom: 20px; }
-            .analysis-content { background-color: #fafafa; padding: 15px; border-radius: 5px; border-left: 5px solid #2980b9; }
-            h2, h3 { color: #34495e; }
-            ul, ol { padding-left: 20px; }
-            code { background-color: #eee; padding: 2px 5px; border-radius: 3px; }
+            :root {{
+                --sidebar-width: 250px;
+                --primary-color: #2c3e50;
+                --accent-color: #2980b9;
+                --bg-color: #f4f4f9;
+            }}
+            body {{ 
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                line-height: 1.6; 
+                color: #333; 
+                margin: 0; 
+                padding: 0; 
+                background-color: var(--bg-color); 
+            }}
+            
+            /* --- Sidebar Styling --- */
+            .sidebar {{
+                height: 100%;
+                width: var(--sidebar-width);
+                position: fixed;
+                z-index: 1000;
+                top: 0;
+                left: 0;
+                background-color: var(--primary-color);
+                overflow-x: hidden;
+                padding-top: 60px; /* Space for hamburger on mobile or top padding */
+                transition: 0.3s;
+                box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            }}
+            
+            .sidebar a {{
+                padding: 15px 25px;
+                text-decoration: none;
+                font-size: 18px;
+                color: #ecf0f1;
+                display: block;
+                transition: 0.3s;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }}
+            
+            .sidebar a:hover {{
+                background-color: var(--accent-color);
+                padding-left: 35px; /* Slide effect */
+            }}
+            
+            /* --- Main Content Styling --- */
+            .main-content {{
+                margin-left: var(--sidebar-width); /* Same as sidebar width */
+                padding: 20px 40px;
+                transition: margin-left 0.3s;
+            }}
+            
+            h1 {{ text-align: center; color: var(--primary-color); margin-bottom: 40px; }}
+            
+            .stock-card {{ 
+                background: #fff; 
+                border-radius: 8px; 
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+                margin-bottom: 40px; 
+                padding: 30px; 
+                scroll-margin-top: 20px; /* For smooth anchor scrolling */
+            }}
+            
+            .stock-title {{ 
+                font-size: 2em; 
+                color: var(--accent-color); 
+                border-bottom: 2px solid #eee; 
+                padding-bottom: 15px; 
+                margin-bottom: 25px; 
+                font-weight: bold;
+            }}
+            
+            .analysis-content {{ background-color: #fafafa; padding: 20px; border-radius: 5px; border-left: 5px solid var(--accent-color); }}
+            h2, h3 {{ color: var(--primary-color); margin-top: 1.5em; }}
+            ul, ol {{ padding-left: 20px; }}
+            code {{ background-color: #eee; padding: 2px 5px; border-radius: 3px; font-family: Consolas, monospace; }}
+
+            /* --- Hamburger Menu (Mobile) --- */
+            .hamburger {{
+                display: none;
+                position: fixed;
+                top: 15px;
+                left: 15px;
+                z-index: 1001;
+                background: var(--accent-color);
+                color: white;
+                border: none;
+                padding: 10px 15px;
+                font-size: 20px;
+                cursor: pointer;
+                border-radius: 5px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            }}
+
+            /* --- Responsive Design --- */
+            @media screen and (max-width: 768px) {{
+                .sidebar {{
+                    width: 0; /* Hidden by default on mobile */
+                    padding-top: 60px;
+                    width: 250px;
+                    transform: translateX(-100%); /* Move off-screen */
+                }}
+                
+                .sidebar.active {{
+                    transform: translateX(0); /* Slide in */
+                }}
+
+                .main-content {{
+                    margin-left: 0; /* Full width on mobile */
+                    padding: 15px;
+                }}
+                
+                .hamburger {{
+                    display: block; /* Show button */
+                }}
+                
+                /* Overlay when sidebar is open */
+                .overlay {{
+                    display: none;
+                    position: fixed;
+                    width: 100%;
+                    height: 100%;
+                    top: 0; 
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background-color: rgba(0,0,0,0.5); 
+                    z-index: 999; 
+                    cursor: pointer;
+                }}
+                
+                .overlay.active {{
+                    display: block;
+                }}
+            }}
         </style>
     </head>
     <body>
+
+    <!-- Mobile Menu Button -->
+    <button class="hamburger" onclick="toggleSidebar()">☰ 目录</button>
+    
+    <!-- Sidebar -->
+    <div class="sidebar" id="mySidebar">
+        <div style="text-align: center; padding: 20px 0; color: white; font-weight: bold; font-size: 1.2em; border-bottom: 1px solid rgba(255,255,255,0.1);">
+            Stock Analysis
+        </div>
+        {sidebar_links}
+    </div>
+    
+    <!-- Overlay for mobile -->
+    <div class="overlay" id="myOverlay" onclick="closeSidebar()"></div>
+
+    <!-- Main Content -->
+    <div class="main-content">
         <h1>Gemini Stock Analysis Report</h1>
     """
 
     for symbol in SYMBOLS:
         analysis_text = analyze_stock(symbol)
-        
-        # Convert Markdown to HTML
         analysis_html = markdown.markdown(analysis_text, extensions=['extra', 'codehilite'])
         
+        # Add ID for anchor linking
         html_content += f"""
-        <div class="stock-card">
+        <div id="{symbol}" class="stock-card">
             <div class="stock-title">{symbol}</div>
             <div class="analysis-content">
                 {analysis_html}
@@ -352,6 +500,20 @@ def main():
         time.sleep(2)
 
     html_content += """
+    </div> <!-- End main-content -->
+
+    <script>
+        function toggleSidebar() {
+            document.getElementById("mySidebar").classList.toggle("active");
+            document.getElementById("myOverlay").classList.toggle("active");
+        }
+
+        function closeSidebar() {
+            // Only relevant for mobile where these classes toggle visibility
+            document.getElementById("mySidebar").classList.remove("active");
+            document.getElementById("myOverlay").classList.remove("active");
+        }
+    </script>
     </body>
     </html>
     """
