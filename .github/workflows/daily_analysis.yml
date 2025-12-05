@@ -2,9 +2,9 @@ name: Daily Stock Analysis
 
 on:
   schedule:
-    # Runs at 22:00 UTC every day (which is 06:00 Beijing Time next day)
-    # Adjust as needed.
-    - cron: '0 22 * * *'
+    # 周二到周六早上 6:00 北京时间执行 (UTC 22:00)
+    # 跳过周日和周一 (0=周日, 1=周一)
+    - cron: '0 22 * * 2-6'
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
 permissions:

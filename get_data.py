@@ -15,16 +15,18 @@ load_dotenv()
 # ================= 用户配置区域 =================
 SYMBOLS = ["IONQ", "OKLO","SMR","LUMN","UEC","MRVL","CCJ","NVDA"] # 股票代码列表
 API_KEY = os.getenv("GEMINI_API_KEY")  # 从环境变量读取API密钥
-MODEL_NAME = "gemini-2.5-pro" # 使用最新的稳定版模型
+PRIMARY_MODEL = "gemini-2.5-pro"      # 主要模型：质量更高但配额较低 (RPD=50)
+FALLBACK_MODEL = "gemini-2.5-flash"   # 备用模型：配额更高 (RPD=250)
 # ===============================================
 
 # 检查API密钥是否存在
 if not API_KEY:
     raise ValueError("请在.env文件中设置GEMINI_API_KEY环境变量")
 
-# 配置 Gemini
+# 配置 Gemini - 初始使用主要模型
 genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel(MODEL_NAME)
+model = genai.GenerativeModel(PRIMARY_MODEL)
+current_model_name = PRIMARY_MODEL  # 追踪当前使用的模型
 
 def calculate_complex_indicators(df):
     """
@@ -311,14 +313,51 @@ def analyze_stock(symbol):
 Here is the Data:
 """
 
-    try:
-        response = model.generate_content(full_prompt)
-        return response.text
-    except Exception as e:
-        return f"Gemini API 调用失败: {str(e)}"
+    global model, current_model_name
+    max_retries = 3
+    retry_delay = 30
+    has_tried_fallback = False  # 标记是否已经尝试过降级
+    
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(full_prompt)
+            return response.text
+        except Exception as e:
+            error_msg = str(e)
+            is_quota_error = "429" in error_msg or "quota" in error_msg.lower()
+            
+            if is_quota_error:
+                # 如果遇到配额错误且还在使用主模型，尝试切换到备用模型
+                if current_model_name == PRIMARY_MODEL and not has_tried_fallback:
+                    print(f"⚠️  {PRIMARY_MODEL} 配额已用完，切换到 {FALLBACK_MODEL}")
+                    model = genai.GenerativeModel(FALLBACK_MODEL)
+                    current_model_name = FALLBACK_MODEL
+                    has_tried_fallback = True
+                    time.sleep(5)  # 短暂等待后重试
+                    continue
+                
+                # 如果已经在使用备用模型或已尝试过降级，则等待后重试
+                if attempt < max_retries - 1:
+                    import re
+                    match = re.search(r'retry in (\d+\.?\d*)', error_msg)
+                    if match:
+                        wait_time = max(float(match.group(1)), retry_delay)
+                    else:
+                        wait_time = retry_delay * (2 ** attempt)
+                    
+                    print(f"⏳ 遇到速率限制，等待 {wait_time:.1f} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    return f"Gemini API 调用失败（已重试{max_retries}次）: {error_msg}"
+            else:
+                return f"Gemini API 调用失败: {error_msg}"
+    
+    return f"Gemini API 调用失败: 超过最大重试次数"
 
 def main():
-    print(f"=== 批量生成全指标分析报告 ===\n")
+    global current_model_name
+    print(f"=== 批量生成全指标分析报告 ===")
+    print(f"📊 当前使用模型: {current_model_name}\n")
     
     # 1. 生成侧边栏链接 HTML
     sidebar_links = ""
@@ -506,8 +545,12 @@ def main():
             </div>
         </div>
         """
-        # Avoid hitting rate limits
-        time.sleep(2)
+        # 根据当前模型调整延迟：
+        # Pro 模型: RPM=2, 需要 35 秒
+        # Flash 模型: RPM=10, 只需 7 秒
+        delay = 35 if current_model_name == PRIMARY_MODEL else 7
+        print(f"✅ 已完成 {symbol}，等待 {delay} 秒... (当前模型: {current_model_name})")
+        time.sleep(delay)
 
     html_content += """
     </div> <!-- End main-content -->
