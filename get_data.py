@@ -6,7 +6,7 @@ import markdown
 import webbrowser
 import os
 import time
-import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -147,7 +147,7 @@ def get_options_analysis(symbol):
             return "无期权数据"
         
         # === 核心逻辑修改：寻找最接近 14 天后的到期日 ===
-        today = datetime.date.today()
+        today = datetime.now(tz=timezone(timedelta(hours=8))).date()
         target_date_str = expirations[0] # 默认兜底
         
         best_diff = 999
@@ -528,8 +528,9 @@ def main():
     </html>
     """
 
-    # 获取当前时间
-    gen_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 获取当前时间（UTC+8 北京时间）
+    tz_utc8 = timezone(timedelta(hours=8))
+    gen_time = datetime.now(tz=tz_utc8).strftime("%Y-%m-%d %H:%M:%S")
     html_content = html_content.replace("{GEN_TIME}", gen_time)
 
     # Save HTML file
