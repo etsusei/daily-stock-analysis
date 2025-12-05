@@ -7,12 +7,20 @@ import webbrowser
 import os
 import time
 import datetime
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 # ================= 用户配置区域 =================
 SYMBOLS = ["IONQ", "OKLO","SMR","LUMN","UEC","MRVL","CCJ","NVDA"] # 股票代码列表
-API_KEY = "AIzaSyCqbO7kvmQdjT2Ilys8ZXMR1oWnHh5jQ3c" # Gemini API Key
+API_KEY = os.getenv("GEMINI_API_KEY")  # 从环境变量读取API密钥
 MODEL_NAME = "gemini-2.5-pro" # 使用最新的稳定版模型
 # ===============================================
+
+# 检查API密钥是否存在
+if not API_KEY:
+    raise ValueError("请在.env文件中设置GEMINI_API_KEY环境变量")
 
 # 配置 Gemini
 genai.configure(api_key=API_KEY)
@@ -317,6 +325,8 @@ def main():
     for symbol in SYMBOLS:
         sidebar_links += f'<a href="#{symbol}" onclick="closeSidebar()">{symbol}</a>\n'
 
+
+
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-CN">
@@ -480,7 +490,7 @@ def main():
 
     <!-- Main Content -->
     <div class="main-content">
-        <h1>Gemini Stock Analysis Report</h1>
+        <h1>Gemini持仓股分析报告 <span style="font-size: 0.5em; color: gray; display: block; margin-top: 10px;">(生成时间: {{GEN_TIME}})</span></h1>
     """
 
     for symbol in SYMBOLS:
@@ -517,6 +527,10 @@ def main():
     </body>
     </html>
     """
+
+    # 获取当前时间
+    gen_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    html_content = html_content.replace("{GEN_TIME}", gen_time)
 
     # Save HTML file
     output_file = "stock_analysis_report.html"
