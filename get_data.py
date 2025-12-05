@@ -6,9 +6,10 @@ import markdown
 import webbrowser
 import os
 import time
+import datetime
 
 # ================= 用户配置区域 =================
-SYMBOLS = ["IONQ", "OKLO","SMR","LUMN","UEC","MRVL","CCJ","NVDA"]  # 股票代码列表
+SYMBOLS = ["IONQ", "OKLO","SMR","LUMN","UEC","MRVL","CCJ","NVDA"] # 股票代码列表
 API_KEY = "AIzaSyCqbO7kvmQdjT2Ilys8ZXMR1oWnHh5jQ3c" # Gemini API Key
 MODEL_NAME = "gemini-2.5-pro" # 使用最新的稳定版模型
 # ===============================================
@@ -117,6 +118,111 @@ def get_data_slice(symbol, interval, fetch_period, slice_count, label):
     
     return csv_buffer.getvalue()
 
+def get_options_analysis(symbol):
+    """
+    智能期权分析：寻找距离今天约 2 周 (14天) 的期权，计算市场押注范围
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+        
+        # 1. 获取当前股价 (作为计算基准)
+        try:
+            current_price = ticker.fast_info['last_price']
+        except:
+            hist = ticker.history(period="1d")
+            if hist.empty: return "无法获取当前股价"
+            current_price = hist['Close'].iloc[-1]
+
+        # 2. 获取到期日列表
+        expirations = ticker.options
+        if not expirations:
+            return "无期权数据"
+        
+        # === 核心逻辑修改：寻找最接近 14 天后的到期日 ===
+        today = datetime.date.today()
+        target_date_str = expirations[0] # 默认兜底
+        
+        best_diff = 999
+        target_days = 14 # <--- 设定目标为 2 周
+        
+        for date_str in expirations:
+            exp_date = pd.to_datetime(date_str).date()
+            days_diff = (exp_date - today).days
+            
+            # 过滤掉 3 天以内的末日轮，噪音太大
+            if days_diff < 3: 
+                continue
+                
+            # 寻找差值最小的日期
+            if abs(days_diff - target_days) < best_diff:
+                best_diff = abs(days_diff - target_days)
+                target_date_str = date_str
+
+        # 计算实际的剩余天数 (DTE)
+        target_date = pd.to_datetime(target_date_str).date()
+        dte = (target_date - today).days
+        if dte < 1: dte = 1
+
+        # 3. 获取该日期的期权链
+        opt = ticker.option_chain(target_date_str)
+        calls = opt.calls
+        puts = opt.puts
+        
+        if calls.empty or puts.empty:
+            return f"期权数据不足"
+
+        # --- 计算核心数据 ---
+        
+        # A. 寻找最大痛点 (Max OI Walls)
+        # 增加过滤器：只看当前股价上下 20% 范围内的，去除极度虚值的无效单
+        filter_mask_call = (calls['strike'] > current_price * 0.8) & (calls['strike'] < current_price * 1.2)
+        filter_mask_put = (puts['strike'] > current_price * 0.8) & (puts['strike'] < current_price * 1.2)
+        
+        filtered_calls = calls[filter_mask_call]
+        filtered_puts = puts[filter_mask_put]
+        
+        # 如果过滤完空了，就用原始数据兜底
+        if filtered_calls.empty: filtered_calls = calls
+        if filtered_puts.empty: filtered_puts = puts
+
+        max_call_oi_row = filtered_calls.loc[filtered_calls['openInterest'].idxmax()]
+        max_put_oi_row = filtered_puts.loc[filtered_puts['openInterest'].idxmax()]
+        
+        resistance_strike = max_call_oi_row['strike']
+        support_strike = max_put_oi_row['strike']
+
+        # B. 计算两周预期波动 (Expected Move)
+        # 1. 计算平均 IV (Implied Volatility)
+        avg_iv = (calls['impliedVolatility'].mean() + puts['impliedVolatility'].mean()) / 2
+        
+        # 2. 核心公式：Expected Move = Price * IV * sqrt(Days / 365)
+        expected_move_price = current_price * avg_iv * ((dte / 365.0) ** 0.5)
+        
+        upper_bound = current_price + expected_move_price
+        lower_bound = current_price - expected_move_price
+        
+        # C. 情绪 PCR (成交量)
+        vol_pcr = puts['volume'].sum() / calls['volume'].sum() if calls['volume'].sum() > 0 else 0
+
+        # --- 生成报告文本 ---
+        report = f"--- 🏛️ 双周博弈分析 (2-Week Outlook) ---\n"
+        report += f"当前价: ${current_price:.2f} | 目标日期: {target_date_str} (未来 {dte} 天)\n"
+        report += f"隐含波动率 (IV): {avg_iv*100:.2f}% (年化)\n\n"
+        
+        report += f"📊 **市场定价波动范围 (Expected Move):**\n"
+        report += f"期权市场押注接下来的两周，股价将在 **${lower_bound:.2f} ~ ${upper_bound:.2f}** 之间波动。\n"
+        report += f"(如果不发生突发黑天鹅，主力认为很难突破此区间)\n\n"
+        
+        report += f"🛡️ **主力攻防线 (OI Walls):**\n"
+        report += f"🔴 上方阻力墙: ${resistance_strike} (OI: {int(max_call_oi_row['openInterest'])})\n"
+        report += f"🟢 下方支撑墙: ${support_strike} (OI: {int(max_put_oi_row['openInterest'])})\n"
+        report += f"💡 逻辑: 只有当股价强势突破 ${resistance_strike}，才可能引发伽马挤压(Gamma Squeeze)加速上涨。\n"
+        
+        return report
+
+    except Exception as e:
+        return f"期权分析异常: {str(e)}"
+
 def analyze_stock(symbol):
     print(f"正在分析 {symbol} ...")
     
@@ -135,6 +241,9 @@ def analyze_stock(symbol):
     
     # 3. 月线: 抓取 max，截取最后 24 个月
     full_prompt += get_data_slice(symbol, "1mo", "max", 24, "月线 (Monthly - Last 2 years)")
+    
+    # 4. 期权分析
+    full_prompt += "\n" + get_options_analysis(symbol) + "\n"
     
     full_prompt += "\n" + "="*20 + "\n"
     full_prompt += f"""
@@ -177,7 +286,13 @@ def analyze_stock(symbol):
 * **情景 B (回踩确认)：** 如果股价回调，哪个位置是“倒车接人”的买点？
 * **情景 C (风险预警)：** 跌破哪个价格要考虑止损？
 
-### 5. 分析师总结 (Conclusion)
+### 5. 🌪️ 衍生品市场与情绪暗涌 (Options & Sentiment Flow)
+*基于提供的期权数据进行分析：*
+* **押注范围验证：** 对比期权计算出的 **Expected Move ** 与你技术分析计算的布林带或均线支撑压力。如果技术位在期权押注范围内，支撑/压力更有效；如果超出范围，说明市场并未定价该风险。
+* **主力筹码墙 (Walls)：** 如果股价接近 **Call Wall**，警惕庄家为了不赔付期权而刻意打压股价。
+* **波动率 (IV) 状态：** 当前 IV 是否过高？如果 IV 很高但股价不涨，是否意味着大资金在买 Put 对冲暴跌风险？
+
+### 6. 分析师总结 (Conclusion)
 * 用一句最精炼的话总结：**主力资金想干什么？我该把注意力放在哪里？**
 
 ---
