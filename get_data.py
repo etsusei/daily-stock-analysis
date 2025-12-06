@@ -9,6 +9,10 @@ import time
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
+# 新版SDK用于联网搜索
+from google import genai as genai_new
+from google.genai import types as genai_types
+
 # 加载环境变量
 load_dotenv()
 
@@ -17,16 +21,22 @@ SYMBOLS = ["IONQ", "OKLO","SMR","LUMN","UEC","MRVL","CCJ","NVDA"] # 股票代码
 API_KEY = os.getenv("GEMINI_API_KEY")  # 从环境变量读取API密钥
 PRIMARY_MODEL = "gemini-2.5-pro"      # 主要模型：质量更高但配额较低 (RPD=50)
 FALLBACK_MODEL = "gemini-2.5-flash"   # 备用模型：配额更高 (RPD=250)
+NEWS_MODEL = "gemini-2.5-flash"       # 新闻搜索模型：使用Flash节省配额
 # ===============================================
 
 # 检查API密钥是否存在
 if not API_KEY:
     raise ValueError("请在.env文件中设置GEMINI_API_KEY环境变量")
 
-# 配置 Gemini - 初始使用主要模型
+# 配置 Gemini - 初始使用主要模型（用于分析）
 genai.configure(api_key=API_KEY)
 model = genai.GenerativeModel(PRIMARY_MODEL)
 current_model_name = PRIMARY_MODEL  # 追踪当前使用的模型
+
+# 配置新版客户端（用于联网搜索）
+news_client = genai_new.Client(api_key=API_KEY)
+news_search_tool = genai_types.Tool(google_search=genai_types.GoogleSearch())
+news_config = genai_types.GenerateContentConfig(tools=[news_search_tool])
 
 def calculate_complex_indicators(df):
     """
@@ -148,12 +158,12 @@ def get_options_analysis(symbol):
         if not expirations:
             return "无期权数据"
         
-        # === 核心逻辑修改：寻找最接近 14 天后的到期日 ===
+        # === 核心逻辑修改：寻找最接近 7 天后的到期日 ===
         today = datetime.now(tz=timezone(timedelta(hours=8))).date()
         target_date_str = expirations[0] # 默认兜底
         
         best_diff = 999
-        target_days = 14 # <--- 设定目标为 2 周
+        target_days = 7  # <--- 设定目标为 1 周
         
         for date_str in expirations:
             exp_date = pd.to_datetime(date_str).date()
@@ -215,12 +225,12 @@ def get_options_analysis(symbol):
         vol_pcr = puts['volume'].sum() / calls['volume'].sum() if calls['volume'].sum() > 0 else 0
 
         # --- 生成报告文本 ---
-        report = f"--- 🏛️ 双周博弈分析 (2-Week Outlook) ---\n"
+        report = f"--- 🏛️ 一周博弈分析 (1-Week Outlook) ---\n"
         report += f"当前价: ${current_price:.2f} | 目标日期: {target_date_str} (未来 {dte} 天)\n"
         report += f"隐含波动率 (IV): {avg_iv*100:.2f}% (年化)\n\n"
         
         report += f"📊 **市场定价波动范围 (Expected Move):**\n"
-        report += f"期权市场押注接下来的两周，股价将在 **${lower_bound:.2f} ~ ${upper_bound:.2f}** 之间波动。\n"
+        report += f"期权市场押注接下来的一周，股价将在 **${lower_bound:.2f} ~ ${upper_bound:.2f}** 之间波动。\n"
         report += f"(如果不发生突发黑天鹅，主力认为很难突破此区间)\n\n"
         
         report += f"🛡️ **主力攻防线 (OI Walls):**\n"
@@ -233,8 +243,43 @@ def get_options_analysis(symbol):
     except Exception as e:
         return f"期权分析异常: {str(e)}"
 
+
+def get_stock_news(symbol):
+    """
+    使用 Flash + Google Search 获取股票的最新新闻
+    返回格式化的新闻摘要
+    """
+    print(f"  📰 正在搜索 {symbol} 新闻...")
+    
+    prompt = f"""
+请搜索 {symbol} 股票最近一周的重大新闻和事件。
+
+要求：
+1. 只列出最重要的3-5条新闻
+2. 每条新闻包含：日期、标题、一句话摘要
+3. 标注新闻来源
+4. 用中文输出
+
+格式示例：
+- **[2025-12-05]** 标题内容 - 摘要内容 (来源: xxx)
+"""
+    
+    try:
+        response = news_client.models.generate_content(
+            model=NEWS_MODEL,
+            contents=prompt,
+            config=news_config,
+        )
+        return response.text
+    except Exception as e:
+        print(f"  ⚠️ 新闻搜索失败: {e}")
+        return "暂无新闻数据"
+
 def analyze_stock(symbol):
     print(f"正在分析 {symbol} ...")
+    
+    # 先获取新闻（使用 Flash + Search）
+    news_summary = get_stock_news(symbol)
     
     full_prompt = f"分析目标: {symbol}\n"
     full_prompt += "指标说明:\n"
@@ -254,6 +299,10 @@ def analyze_stock(symbol):
     
     # 4. 期权分析
     full_prompt += "\n" + get_options_analysis(symbol) + "\n"
+    
+    # 5. 新闻数据
+    full_prompt += "\n" + "="*20 + "\n"
+    full_prompt += f"📰 **近期新闻动态:**\n{news_summary}\n"
     
     full_prompt += "\n" + "="*20 + "\n"
     full_prompt += f"""
@@ -302,13 +351,20 @@ def analyze_stock(symbol):
 * **主力筹码墙 (Walls)：** 如果股价接近 **Call Wall**，警惕庄家为了不赔付期权而刻意打压股价。
 * **波动率 (IV) 状态：** 当前 IV 是否过高？如果 IV 很高但股价不涨，是否意味着大资金在买 Put 对冲暴跌风险？
 
-### 6. 分析师总结 (Conclusion)
+### 6. 📰 消息面解读 (News & Catalyst Analysis)
+*结合我提供的近期新闻动态:*
+* 近期有哪些重大新闻/事件可能影响股价？
+* 这些消息是利好还是利空？已经被price in了吗？
+* 是否有即将到来的催化剂（财报、产品发布等）？
+
+### 7. 分析师总结 (Conclusion)
 * 用一句最精炼的话总结：**主力资金想干什么？我该把注意力放在哪里？**
 
 ---
 **格式要求：**
 1. **数据驱动：** 所有观点必须引用 CSV 中的具体数值（如成交量倍数、EMA价格）。
 2. **重点突出：** 关键价格和建议请使用**加粗**。
+3. **⚠️ 严禁输出原始数据：** 不要在分析报告中包含任何CSV表格或原始数据块，只输出你的分析文字。
 
 Here is the Data:
 """
@@ -321,7 +377,8 @@ Here is the Data:
     for attempt in range(max_retries):
         try:
             response = model.generate_content(full_prompt)
-            return response.text
+            # 返回元组：(新闻摘要, 分析结果)
+            return (news_summary, response.text)
         except Exception as e:
             error_msg = str(e)
             is_quota_error = "429" in error_msg or "quota" in error_msg.lower()
@@ -348,11 +405,11 @@ Here is the Data:
                     print(f"⏳ 遇到速率限制，等待 {wait_time:.1f} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
                     time.sleep(wait_time)
                 else:
-                    return f"Gemini API 调用失败（已重试{max_retries}次）: {error_msg}"
+                    return (news_summary, f"Gemini API 调用失败（已重试{max_retries}次）: {error_msg}")
             else:
-                return f"Gemini API 调用失败: {error_msg}"
+                return (news_summary, f"Gemini API 调用失败: {error_msg}")
     
-    return f"Gemini API 调用失败: 超过最大重试次数"
+    return (news_summary, f"Gemini API 调用失败: 超过最大重试次数")
 
 def main():
     global current_model_name
@@ -533,13 +590,22 @@ def main():
     """
 
     for symbol in SYMBOLS:
-        analysis_text = analyze_stock(symbol)
+        news_text, analysis_text = analyze_stock(symbol)
+        news_html = markdown.markdown(news_text, extensions=['extra', 'codehilite'])
         analysis_html = markdown.markdown(analysis_text, extensions=['extra', 'codehilite'])
         
-        # Add ID for anchor linking
+        # Add ID for anchor linking with news section before analysis
         html_content += f"""
         <div id="{symbol}" class="stock-card">
             <div class="stock-title">{symbol}</div>
+            
+            <!-- News Section -->
+            <div class="news-section" style="background-color: #fff8e1; padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 5px solid #ff9800;">
+                <h3 style="color: #e65100; margin-top: 0;">📰 近期新闻动态</h3>
+                {news_html}
+            </div>
+            
+            <!-- Analysis Section -->
             <div class="analysis-content">
                 {analysis_html}
             </div>
