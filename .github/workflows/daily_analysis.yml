@@ -2,9 +2,9 @@ name: Daily Stock Analysis
 
 on:
   schedule:
-    # 周二到周六早上 6:00 北京时间执行 (UTC 22:00)
-    # 跳过周日和周一 (0=周日, 1=周一)
-    - cron: '0 22 * * 2-6'
+    # 北京时间周二到周六早上 6:00 执行 = UTC 周一到周五 22:00
+    # (因为 UTC 比北京时间晚 8 小时，会跨天)
+    - cron: '0 22 * * 1-5'
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
 permissions:
