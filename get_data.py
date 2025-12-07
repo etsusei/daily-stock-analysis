@@ -1,17 +1,23 @@
 import yfinance as yf
 import pandas as pd
 import io
-import google.generativeai as genai
 import markdown
 import webbrowser
 import os
 import time
+import random
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
-# 新版SDK用于联网搜索
+# 新版SDK用于联网搜索 + 分析（一次请求完成）
 from google import genai as genai_new
 from google.genai import types as genai_types
+
+# 伪造浏览器请求头，防止被 Yahoo Finance 拉黑
+YF_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+yf.set_tz_cache_location(".yf_cache")  # 本地缓存时区信息
 
 # 加载环境变量
 load_dotenv()
@@ -19,24 +25,17 @@ load_dotenv()
 # ================= 用户配置区域 =================
 SYMBOLS = ["IONQ", "OKLO","SMR","LUMN","UEC","MRVL","CCJ","NVDA"] # 股票代码列表
 API_KEY = os.getenv("GEMINI_API_KEY")  # 从环境变量读取API密钥
-PRIMARY_MODEL = "gemini-2.5-pro"      # 主要模型：质量更高但配额较低 (RPD=50)
-FALLBACK_MODEL = "gemini-2.5-flash"   # 备用模型：配额更高 (RPD=250)
-NEWS_MODEL = "gemini-2.5-flash"       # 新闻搜索模型：使用Flash节省配额
+ANALYSIS_MODEL = "gemini-2.5-flash"   # 统一使用 Flash 模型 + Google Search
 # ===============================================
 
 # 检查API密钥是否存在
 if not API_KEY:
     raise ValueError("请在.env文件中设置GEMINI_API_KEY环境变量")
 
-# 配置 Gemini - 初始使用主要模型（用于分析）
-genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel(PRIMARY_MODEL)
-current_model_name = PRIMARY_MODEL  # 追踪当前使用的模型
-
-# 配置新版客户端（用于联网搜索）
-news_client = genai_new.Client(api_key=API_KEY)
-news_search_tool = genai_types.Tool(google_search=genai_types.GoogleSearch())
-news_config = genai_types.GenerateContentConfig(tools=[news_search_tool])
+# 配置新版客户端（用于联网搜索 + 分析，一次请求完成）
+client = genai_new.Client(api_key=API_KEY)
+search_tool = genai_types.Tool(google_search=genai_types.GoogleSearch())
+generate_config = genai_types.GenerateContentConfig(tools=[search_tool])
 
 def calculate_complex_indicators(df):
     """
@@ -244,42 +243,11 @@ def get_options_analysis(symbol):
         return f"期权分析异常: {str(e)}"
 
 
-def get_stock_news(symbol):
-    """
-    使用 Flash + Google Search 获取股票的最新新闻
-    返回格式化的新闻摘要
-    """
-    print(f"  📰 正在搜索 {symbol} 新闻...")
-    
-    prompt = f"""
-请搜索 {symbol} 股票最近一周的重大新闻和事件。
-
-要求：
-1. 只列出最重要的3-5条新闻
-2. 每条新闻包含：日期、标题、一句话摘要
-3. 标注新闻来源
-4. 用中文输出
-
-格式示例：
-- **[2025-12-05]** 标题内容 - 摘要内容 (来源: xxx)
-"""
-    
-    try:
-        response = news_client.models.generate_content(
-            model=NEWS_MODEL,
-            contents=prompt,
-            config=news_config,
-        )
-        return response.text
-    except Exception as e:
-        print(f"  ⚠️ 新闻搜索失败: {e}")
-        return "暂无新闻数据"
-
 def analyze_stock(symbol):
-    print(f"正在分析 {symbol} ...")
-    
-    # 先获取新闻（使用 Flash + Search）
-    news_summary = get_stock_news(symbol)
+    """
+    使用 Flash + Google Search 一次性完成新闻搜索和技术分析
+    """
+    print(f"正在分析 {symbol} (使用 {ANALYSIS_MODEL} + Google Search)...")
     
     full_prompt = f"分析目标: {symbol}\n"
     full_prompt += "指标说明:\n"
@@ -288,21 +256,30 @@ def analyze_stock(symbol):
     full_prompt += "3. MACD: (5,15,6) | KDJ: (9,3,3) | RSI: (14)\n"
     full_prompt += "=" * 50 + "\n\n"
 
+    # 内部延迟函数：防止 yfinance 请求过于密集被 Yahoo 拉黑
+    def _sleep_between_requests():
+        delay = random.uniform(2, 4)  # 2-4秒随机延迟
+        print(f"  ⏳ 等待 {delay:.1f}s 防止请求过密...")
+        time.sleep(delay)
+    
     # 1. 日线: 抓取 max，截取最后 120 天
     full_prompt += get_data_slice(symbol, "1d", "max", 120, "日线 (Daily - Last 120 days)") + "\n\n"
+    _sleep_between_requests()
     
     # 2. 周线: 抓取 max，截取最后 52 周 (约1年)
     full_prompt += get_data_slice(symbol, "1wk", "max", 52, "周线 (Weekly - Last 1 year)") + "\n\n"
+    _sleep_between_requests()
     
     # 3. 月线: 抓取 max，截取最后 24 个月
     full_prompt += get_data_slice(symbol, "1mo", "max", 24, "月线 (Monthly - Last 2 years)")
+    _sleep_between_requests()
     
     # 4. 期权分析
     full_prompt += "\n" + get_options_analysis(symbol) + "\n"
     
-    # 5. 新闻数据
+    # 5. 新闻数据 - 让模型通过 Google Search 自动搜索
     full_prompt += "\n" + "="*20 + "\n"
-    full_prompt += f"📰 **近期新闻动态:**\n{news_summary}\n"
+    full_prompt += f"📰 **近期新闻动态:** 请使用 Google Search 工具搜索 {symbol} 最近一周的重大新闻和事件，并整合到你的分析中。\n"
     
     full_prompt += "\n" + "="*20 + "\n"
     full_prompt += f"""
@@ -369,52 +346,41 @@ def analyze_stock(symbol):
 Here is the Data:
 """
 
-    global model, current_model_name
+
     max_retries = 3
     retry_delay = 30
-    has_tried_fallback = False  # 标记是否已经尝试过降级
     
     for attempt in range(max_retries):
         try:
-            response = model.generate_content(full_prompt)
-            # 返回元组：(新闻摘要, 分析结果)
-            return (news_summary, response.text)
+            response = client.models.generate_content(
+                model=ANALYSIS_MODEL,
+                contents=full_prompt,
+                config=generate_config,
+            )
+            # 直接返回分析结果（新闻已整合在分析中）
+            return response.text
         except Exception as e:
             error_msg = str(e)
             is_quota_error = "429" in error_msg or "quota" in error_msg.lower()
             
-            if is_quota_error:
-                # 如果遇到配额错误且还在使用主模型，尝试切换到备用模型
-                if current_model_name == PRIMARY_MODEL and not has_tried_fallback:
-                    print(f"⚠️  {PRIMARY_MODEL} 配额已用完，切换到 {FALLBACK_MODEL}")
-                    model = genai.GenerativeModel(FALLBACK_MODEL)
-                    current_model_name = FALLBACK_MODEL
-                    has_tried_fallback = True
-                    time.sleep(5)  # 短暂等待后重试
-                    continue
-                
-                # 如果已经在使用备用模型或已尝试过降级，则等待后重试
-                if attempt < max_retries - 1:
-                    import re
-                    match = re.search(r'retry in (\d+\.?\d*)', error_msg)
-                    if match:
-                        wait_time = max(float(match.group(1)), retry_delay)
-                    else:
-                        wait_time = retry_delay * (2 ** attempt)
-                    
-                    print(f"⏳ 遇到速率限制，等待 {wait_time:.1f} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
-                    time.sleep(wait_time)
+            if is_quota_error and attempt < max_retries - 1:
+                import re
+                match = re.search(r'retry in (\d+\.?\d*)', error_msg)
+                if match:
+                    wait_time = max(float(match.group(1)), retry_delay)
                 else:
-                    return (news_summary, f"Gemini API 调用失败（已重试{max_retries}次）: {error_msg}")
+                    wait_time = retry_delay * (2 ** attempt)
+                
+                print(f"⏳ 遇到速率限制，等待 {wait_time:.1f} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
             else:
-                return (news_summary, f"Gemini API 调用失败: {error_msg}")
+                return f"Gemini API 调用失败: {error_msg}"
     
-    return (news_summary, f"Gemini API 调用失败: 超过最大重试次数")
+    return f"Gemini API 调用失败: 超过最大重试次数"
 
 def main():
-    global current_model_name
     print(f"=== 批量生成全指标分析报告 ===")
-    print(f"📊 当前使用模型: {current_model_name}\n")
+    print(f"📊 使用模型: {ANALYSIS_MODEL} + Google Search\n")
     
     # 1. 生成侧边栏链接 HTML
     sidebar_links = ""
@@ -590,32 +556,23 @@ def main():
     """
 
     for symbol in SYMBOLS:
-        news_text, analysis_text = analyze_stock(symbol)
-        news_html = markdown.markdown(news_text, extensions=['extra', 'codehilite'])
+        analysis_text = analyze_stock(symbol)
         analysis_html = markdown.markdown(analysis_text, extensions=['extra', 'codehilite'])
         
-        # Add ID for anchor linking with news section before analysis
+        # Add ID for anchor linking - 新闻已整合在分析内容中
         html_content += f"""
         <div id="{symbol}" class="stock-card">
             <div class="stock-title">{symbol}</div>
             
-            <!-- News Section -->
-            <div class="news-section" style="background-color: #fff8e1; padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 5px solid #ff9800;">
-                <h3 style="color: #e65100; margin-top: 0;">📰 近期新闻动态</h3>
-                {news_html}
-            </div>
-            
-            <!-- Analysis Section -->
+            <!-- Analysis Section (含新闻分析) -->
             <div class="analysis-content">
                 {analysis_html}
             </div>
         </div>
         """
-        # 根据当前模型调整延迟：
-        # Pro 模型: RPM=2, 需要 35 秒
-        # Flash 模型: RPM=10, 只需 7 秒
-        delay = 35 if current_model_name == PRIMARY_MODEL else 7
-        print(f"✅ 已完成 {symbol}，等待 {delay} 秒... (当前模型: {current_model_name})")
+        # Flash 模型: RPM=5, 需要至少 12 秒间隔 (留余量设为 13 秒)
+        delay = 13
+        print(f"✅ 已完成 {symbol}，等待 {delay} 秒 (Gemini RPM=5 限制)...")
         time.sleep(delay)
 
     html_content += """
