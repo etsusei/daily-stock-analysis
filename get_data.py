@@ -357,8 +357,15 @@ Here is the Data:
                 contents=full_prompt,
                 config=generate_config,
             )
-            # 直接返回分析结果（新闻已整合在分析中）
-            return response.text
+            # 检查响应是否为空
+            if response and response.text:
+                return response.text
+            else:
+                print(f"⚠️ Gemini 返回空响应，重试...")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return f"Gemini API 返回空响应"
         except Exception as e:
             error_msg = str(e)
             is_quota_error = "429" in error_msg or "quota" in error_msg.lower()
@@ -557,6 +564,9 @@ def main():
 
     for symbol in SYMBOLS:
         analysis_text = analyze_stock(symbol)
+        # 防止空响应导致崩溃
+        if not analysis_text:
+            analysis_text = f"⚠️ {symbol} 分析失败：未能获取有效响应"
         analysis_html = markdown.markdown(analysis_text, extensions=['extra', 'codehilite'])
         
         # Add ID for anchor linking - 新闻已整合在分析内容中
