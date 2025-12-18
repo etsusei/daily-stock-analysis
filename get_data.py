@@ -9,7 +9,7 @@ import random
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
-# 新版SDK用于联网搜索 + 分析（一次请求完成）
+# 新版SDK用于联网搜索 + 分析
 from google import genai as genai_new
 from google.genai import types as genai_types
 
@@ -23,19 +23,25 @@ yf.set_tz_cache_location(".yf_cache")  # 本地缓存时区信息
 load_dotenv()
 
 # ================= 用户配置区域 =================
-SYMBOLS = ["IONQ", "OKLO","SMR","LUMN","UEC","MRVL","CCJ","NVDA"] # 股票代码列表
+SYMBOLS = ["IONQ", "OKLO","SMR","LUMN","UEC","MRVL","NVDA"]# 股票代码列表
 API_KEY = os.getenv("GEMINI_API_KEY")  # 从环境变量读取API密钥
-ANALYSIS_MODEL = "gemini-2.5-flash"   # 统一使用 Flash 模型 + Google Search
+NEWS_MODEL = "gemini-2.5-flash"        # 新闻搜索模型：2.5 Flash + Google Search
+ANALYSIS_MODEL = "gemini-3-flash-preview"    # 分析模型：Gemini 2.0 Flash 实验版（最新）
 # ===============================================
 
 # 检查API密钥是否存在
 if not API_KEY:
     raise ValueError("请在.env文件中设置GEMINI_API_KEY环境变量")
 
-# 配置新版客户端（用于联网搜索 + 分析，一次请求完成）
+# 配置新版客户端
 client = genai_new.Client(api_key=API_KEY)
+
+# 新闻搜索配置 (带 Google Search 工具)
 search_tool = genai_types.Tool(google_search=genai_types.GoogleSearch())
-generate_config = genai_types.GenerateContentConfig(tools=[search_tool])
+news_config = genai_types.GenerateContentConfig(tools=[search_tool])
+
+# 分析配置 (不带搜索工具)
+analysis_config = genai_types.GenerateContentConfig()
 
 def calculate_complex_indicators(df):
     """
@@ -243,12 +249,56 @@ def get_options_analysis(symbol):
         return f"期权分析异常: {str(e)}"
 
 
+def get_stock_news(symbol):
+    """
+    使用 gemini-2.5-flash + Google Search 获取股票的最新新闻
+    返回格式化的新闻摘要
+    """
+    print(f"  📰 正在搜索 {symbol} 新闻 (使用 {NEWS_MODEL})...")
+    
+    prompt = f"""
+请搜索 {symbol} 股票最近一周的重大新闻和事件。
+
+要求：
+1. 只列出最重要的3-5条新闻
+2. 每条新闻包含：日期、标题、一句话摘要
+3. 标注新闻来源
+4. 用中文输出
+
+格式示例：
+- **[2025-12-05]** 标题内容 - 摘要内容 (来源: xxx)
+"""
+    
+    try:
+        response = client.models.generate_content(
+            model=NEWS_MODEL,
+            contents=prompt,
+            config=news_config,
+        )
+        return response.text
+    except Exception as e:
+        print(f"  ⚠️ 新闻搜索失败: {e}")
+        return "暂无新闻数据"
+
+
 def analyze_stock(symbol):
     """
-    使用 Flash + Google Search 一次性完成新闻搜索和技术分析
+    分两步完成分析：
+    1. 使用 gemini-2.5-flash + Google Search 搜索新闻
+    2. 使用 gemini-2.0-flash (Gemini 3 Flash) 进行技术分析
     """
-    print(f"正在分析 {symbol} (使用 {ANALYSIS_MODEL} + Google Search)...")
+    print(f"正在分析 {symbol}...")
     
+    # 第一步：获取新闻（使用 2.5 Flash + Search）
+    news_summary = get_stock_news(symbol)
+    
+    # 内部延迟函数：防止 yfinance 请求过于密集被 Yahoo 拉黑
+    def _sleep_between_requests():
+        delay = random.uniform(2, 4)  # 2-4秒随机延迟
+        print(f"  ⏳ 等待 {delay:.1f}s 防止请求过密...")
+        time.sleep(delay)
+    
+    # 第二步：构建分析 Prompt
     full_prompt = f"分析目标: {symbol}\n"
     full_prompt += "指标说明:\n"
     full_prompt += "1. EMA组: 5,10,20,30,55,80,120,135,180 (注意：如果是新股或月线数据不足，长周期均线可能为空)\n"
@@ -256,12 +306,6 @@ def analyze_stock(symbol):
     full_prompt += "3. MACD: (5,15,6) | KDJ: (9,3,3) | RSI: (14)\n"
     full_prompt += "=" * 50 + "\n\n"
 
-    # 内部延迟函数：防止 yfinance 请求过于密集被 Yahoo 拉黑
-    def _sleep_between_requests():
-        delay = random.uniform(2, 4)  # 2-4秒随机延迟
-        print(f"  ⏳ 等待 {delay:.1f}s 防止请求过密...")
-        time.sleep(delay)
-    
     # 1. 日线: 抓取 max，截取最后 120 天
     full_prompt += get_data_slice(symbol, "1d", "max", 120, "日线 (Daily - Last 120 days)") + "\n\n"
     _sleep_between_requests()
@@ -277,9 +321,9 @@ def analyze_stock(symbol):
     # 4. 期权分析
     full_prompt += "\n" + get_options_analysis(symbol) + "\n"
     
-    # 5. 新闻数据 - 让模型通过 Google Search 自动搜索
+    # 5. 新闻数据
     full_prompt += "\n" + "="*20 + "\n"
-    full_prompt += f"📰 **近期新闻动态:** 请使用 Google Search 工具搜索 {symbol} 最近一周的重大新闻和事件，并整合到你的分析中。\n"
+    full_prompt += f"📰 **近期新闻动态:**\n{news_summary}\n"
     
     full_prompt += "\n" + "="*20 + "\n"
     full_prompt += f"""
@@ -301,7 +345,7 @@ def analyze_stock(symbol):
 
 ### 1. 🚨 盘前核心判断 (The Verdict)
 * **趋势定性：** 读取数据中**最新一行的收盘价**，结合 EMA 均线状态，判断当前是反转、加速还是回调等？
-* **量能“测谎”：** 重点分析**最近3根 K 线的成交量 (Volume)**。相比前几天，是有主力资金进场抢筹，还是缩量观望？
+* **量能"测谎"：** 重点分析**最近3根 K 线的成交量 (Volume)**。相比前几天，是有主力资金进场抢筹，还是缩量观望？
 
 ### 2. 实战必须盯紧的三大点位 (Key Levels to Watch)
 * **⚔️ 上方阻力位（冲关点）：** 计算布林带上轨、前高或整数关口的压力。
@@ -310,16 +354,16 @@ def analyze_stock(symbol):
 
 ### 3. 技术面深度透视 (Institutional Deep Dive)
 *拒绝罗列数字，我要看逻辑：*
-* **均线系统 (EMAs)：** 是否有关键的“金叉”或“一阳穿多线”等形态？牛熊分界线（EMA55/120）是否已被收复？
+* **均线系统 (EMAs)：** 是否有关键的"金叉"或"一阳穿多线"等形态？牛熊分界线（EMA55/120）是否已被收复？
 * **指标共振 (Indicators)：**
     * **MACD：** 动能强弱？是否出现金叉/死叉？
     * **KDJ：** J值是否过高（>90 提示超买）或过低？
     * **RSI：** 处于强势区还是弱势区？
-* **大周期确认 (Weekly/Monthly)：** 周线级别是否有“包容形态”或其他趋势配合？
+* **大周期确认 (Weekly/Monthly)：** 周线级别是否有"包容形态"或其他趋势配合？
 
 ### 4. 交易博弈推演 (Scenario Planning)
 * **情景 A (强势上攻)：** 如果开盘直接冲过阻力位，应该追涨还是减仓？
-* **情景 B (回踩确认)：** 如果股价回调，哪个位置是“倒车接人”的买点？
+* **情景 B (回踩确认)：** 如果股价回调，哪个位置是"倒车接人"的买点？
 * **情景 C (风险预警)：** 跌破哪个价格要考虑止损？
 
 ### 5. 🌪️ 衍生品市场与情绪暗涌 (Options & Sentiment Flow)
@@ -346,7 +390,9 @@ def analyze_stock(symbol):
 Here is the Data:
 """
 
-
+    # 使用 Gemini 3.0 Flash (3 Flash) 进行分析
+    print(f"  🤖 正在使用 {ANALYSIS_MODEL} 进行技术分析...")
+    
     max_retries = 3
     retry_delay = 30
     
@@ -355,17 +401,18 @@ Here is the Data:
             response = client.models.generate_content(
                 model=ANALYSIS_MODEL,
                 contents=full_prompt,
-                config=generate_config,
+                config=analysis_config,
             )
             # 检查响应是否为空
             if response and response.text:
-                return response.text
+                # 返回元组：(新闻摘要, 分析结果)
+                return (news_summary, response.text)
             else:
                 print(f"⚠️ Gemini 返回空响应，重试...")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     continue
-                return f"Gemini API 返回空响应"
+                return (news_summary, f"Gemini API 返回空响应")
         except Exception as e:
             error_msg = str(e)
             is_quota_error = "429" in error_msg or "quota" in error_msg.lower()
@@ -381,13 +428,15 @@ Here is the Data:
                 print(f"⏳ 遇到速率限制，等待 {wait_time:.1f} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
                 time.sleep(wait_time)
             else:
-                return f"Gemini API 调用失败: {error_msg}"
+                return (news_summary, f"Gemini API 调用失败: {error_msg}")
     
-    return f"Gemini API 调用失败: 超过最大重试次数"
+    return (news_summary, f"Gemini API 调用失败: 超过最大重试次数")
+
 
 def main():
     print(f"=== 批量生成全指标分析报告 ===")
-    print(f"📊 使用模型: {ANALYSIS_MODEL} + Google Search\n")
+    print(f"� 新闻搜索模型: {NEWS_MODEL} + Google Search")
+    print(f"🤖 技术分析模型: {ANALYSIS_MODEL}\n")
     
     # 1. 生成侧边栏链接 HTML
     sidebar_links = ""
@@ -563,26 +612,33 @@ def main():
     """
 
     for symbol in SYMBOLS:
-        analysis_text = analyze_stock(symbol)
-        # 防止空响应导致崩溃
-        if not analysis_text:
-            analysis_text = f"⚠️ {symbol} 分析失败：未能获取有效响应"
+        news_text, analysis_text = analyze_stock(symbol)
+        news_html = markdown.markdown(news_text, extensions=['extra', 'codehilite'])
         analysis_html = markdown.markdown(analysis_text, extensions=['extra', 'codehilite'])
         
-        # Add ID for anchor linking - 新闻已整合在分析内容中
+        # Add ID for anchor linking with news section before analysis
         html_content += f"""
         <div id="{symbol}" class="stock-card">
             <div class="stock-title">{symbol}</div>
             
-            <!-- Analysis Section (含新闻分析) -->
+            <!-- News Section -->
+            <div class="news-section" style="background-color: #fff8e1; padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 5px solid #ff9800;">
+                <h3 style="color: #e65100; margin-top: 0;">📰 近期新闻动态</h3>
+                {news_html}
+            </div>
+            
+            <!-- Analysis Section -->
             <div class="analysis-content">
                 {analysis_html}
             </div>
         </div>
         """
-        # Flash 模型: RPM=5, 需要至少 12 秒间隔 (留余量设为 13 秒)
-        delay = 13
-        print(f"✅ 已完成 {symbol}，等待 {delay} 秒 (Gemini RPM=5 限制)...")
+        # 两个模型都需要等待：
+        # - 2.5 Flash: RPM=5, 需要 12 秒
+        # - 2.0 Flash: RPM=10, 需要 6 秒
+        # 保守起见，取 15 秒以避免速率限制
+        delay = 15
+        print(f"✅ 已完成 {symbol}，等待 {delay} 秒...")
         time.sleep(delay)
 
     html_content += """
