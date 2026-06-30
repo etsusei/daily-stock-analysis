@@ -23,7 +23,7 @@ yf.set_tz_cache_location(".yf_cache")  # 本地缓存时区信息
 load_dotenv()
 
 # ================= 用户配置区域 =================
-SYMBOLS = ["IONQ","AMSC", "SNOW","NOW","NOK","SMCI","RCAT","UEC","GLW","NVDA"]# 股票代码列表
+SYMBOLS = ["IONQ","MRVL", "COHR","NOW","NOK","SMCI","IBM","UEC","GLW","NVDA"]# 股票代码列表
 API_KEY = os.getenv("GEMINI_API_KEY")  # 从环境变量读取API密钥
 NEWS_MODEL = "gemini-2.5-flash"        # 新闻搜索模型：3.1 Flash + Google Search
 ANALYSIS_MODEL = "gemini-3.5-flash"    # 分析模型：Gemini 3.5 Flash （最新）
